@@ -157,19 +157,28 @@ fn format_pdf_date(raw: &str) -> String {
     let min = s.get(10..12).unwrap_or("00");
     let sec = s.get(12..14).unwrap_or("00");
 
-    // Timezone offset (e.g. +01'00' or Z)
+    // Timezone: `Z`, or `+HH'mm'` with the minutes optional (ISO 32000-2
+    // §7.9.4). Keep the minutes when they are there: +05'30' is India and
+    // -03'30' is Newfoundland, and truncating either to the hour reports a
+    // time that is off by half an hour. Some writers append `00'00'` after
+    // `Z`; that is still UTC.
     let tz_part = s.get(14..).unwrap_or("");
     let tz = if tz_part.starts_with('Z') {
         " UTC".to_string()
-    } else if tz_part.len() >= 3 {
-        // +01'00' -> +01:00
-        let cleaned = tz_part.replace('\'', "");
-        if cleaned.is_ascii() && cleaned.len() >= 3 {
-            format!(" {}", &cleaned[..3])
-        } else if cleaned.len() >= 3 {
-            // Non-ASCII timezone - take first 3 chars safely
-            let prefix: String = cleaned.chars().take(3).collect();
-            format!(" {prefix}")
+    } else if let Some(sign) = tz_part.chars().next().filter(|c| *c == '+' || *c == '-') {
+        let digits: Vec<char> = tz_part[1..]
+            .chars()
+            .filter(char::is_ascii_digit)
+            .take(4)
+            .collect();
+        if digits.len() >= 2 {
+            let hh: String = digits[..2].iter().collect();
+            let mm: String = if digits.len() >= 4 {
+                digits[2..4].iter().collect()
+            } else {
+                "00".to_string()
+            };
+            format!(" {sign}{hh}:{mm}")
         } else {
             String::new()
         }
@@ -2160,5 +2169,75 @@ impl Image {
             components: img.components,
             data,
         }
+    }
+}
+
+#[cfg(all(test, feature = "pdf"))]
+mod tests {
+    use super::format_pdf_date;
+
+    #[test]
+    fn pdf_date_whole_hour_offset() {
+        assert_eq!(
+            format_pdf_date("D:20240422220146+00'00'"),
+            "2024-04-22 22:01:46 +00:00"
+        );
+        assert_eq!(
+            format_pdf_date("D:20260723150218+02'00'"),
+            "2026-07-23 15:02:18 +02:00"
+        );
+        assert_eq!(
+            format_pdf_date("D:20240101120000-07'00'"),
+            "2024-01-01 12:00:00 -07:00"
+        );
+    }
+
+    #[test]
+    fn pdf_date_keeps_offset_minutes() {
+        assert_eq!(
+            format_pdf_date("D:20240101120000+05'30'"),
+            "2024-01-01 12:00:00 +05:30"
+        );
+        assert_eq!(
+            format_pdf_date("D:20240101120000-03'30'"),
+            "2024-01-01 12:00:00 -03:30"
+        );
+        assert_eq!(
+            format_pdf_date("D:20240101120000+05'45'"),
+            "2024-01-01 12:00:00 +05:45"
+        );
+    }
+
+    #[test]
+    fn pdf_date_utc_forms() {
+        assert_eq!(
+            format_pdf_date("D:20260723130158Z"),
+            "2026-07-23 13:01:58 UTC"
+        );
+        assert_eq!(
+            format_pdf_date("D:20260723130158Z00'00'"),
+            "2026-07-23 13:01:58 UTC"
+        );
+    }
+
+    #[test]
+    fn pdf_date_optional_fields() {
+        assert_eq!(format_pdf_date("D:20240615"), "2024-06-15 00:00:00");
+        assert_eq!(format_pdf_date("20240615120000"), "2024-06-15 12:00:00");
+        assert_eq!(
+            format_pdf_date("D:20240101120000+02"),
+            "2024-01-01 12:00:00 +02:00"
+        );
+        assert_eq!(
+            format_pdf_date("D:20240101120000+02'"),
+            "2024-01-01 12:00:00 +02:00"
+        );
+    }
+
+    #[test]
+    fn pdf_date_malformed_passes_through_or_drops_offset() {
+        assert_eq!(format_pdf_date("D:2024"), "D:2024");
+        assert_eq!(format_pdf_date("D:20240101120000+"), "2024-01-01 12:00:00");
+        assert_eq!(format_pdf_date("D:20240101120000+x"), "2024-01-01 12:00:00");
     }
 }
