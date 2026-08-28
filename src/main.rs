@@ -630,9 +630,17 @@ fn cmd_info(args: &[String]) -> Result<(), u8> {
 
         match file_type {
             Some(siftx::core::FileType::Pdf) => {
+                // `info` mirrors pdfinfo, which reads the Info dictionary.
+                // A PDF often states the same field in its XMP as well
+                // (CreateDate and ModifyDate in particular), and the XMP
+                // tags come first in the flat list carrying the value as
+                // written in the XML rather than the formatted one. Prefer
+                // the PDF group so every file prints the same shape, and
+                // fall back to any group for fields the Info dict lacks.
                 let find = |name: &str| -> Option<String> {
                     tags.iter()
-                        .find(|t| t.name == name)
+                        .find(|t| t.group == "PDF" && t.name == name)
+                        .or_else(|| tags.iter().find(|t| t.name == name))
                         .map(|t| t.value.clone())
                 };
                 let find_longest = |name: &str| -> Option<String> {
