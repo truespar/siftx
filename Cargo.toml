@@ -54,6 +54,9 @@ cbc = "0.2"
 # tests/ only, so a bare `cargo test` works.
 truespar-siftx = { path = ".", features = ["internals"] }
 tempfile = "3"
+# Used by the text-layout tests to check that the reading-order comparator is
+# a strict weak ordering. Sorting with one that is not aborts the process.
+proptest = "1"
 criterion = { version = "0.8", features = ["html_reports"] }
 
 [[bench]]

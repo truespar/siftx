@@ -428,7 +428,7 @@ fn remove_duplicates(chars: &mut Vec<PositionedChar>) {
     indices.sort_by(|&a, &b| {
         let pa = primary_coord(&chars[a]);
         let pb = primary_coord(&chars[b]);
-        pa.partial_cmp(&pb).unwrap_or(std::cmp::Ordering::Equal)
+        pa.total_cmp(&pb)
     });
 
     for i in 0..indices.len() {
@@ -500,13 +500,13 @@ fn form_words(chars: &[PositionedChar]) -> Vec<TextWord> {
     sorted.sort_by(|a, b| {
         let ba = baseline_coord(a);
         let bb = baseline_coord(b);
-        let cmp = ba.partial_cmp(&bb).unwrap_or(std::cmp::Ordering::Equal);
+        let cmp = ba.total_cmp(&bb);
         if cmp != std::cmp::Ordering::Equal {
             return cmp;
         }
         let pa = primary_coord(a);
         let pb = primary_coord(b);
-        pa.partial_cmp(&pb).unwrap_or(std::cmp::Ordering::Equal)
+        pa.total_cmp(&pb)
     });
 
     let mut words = Vec::new();
@@ -740,13 +740,13 @@ fn form_lines(words: Vec<TextWord>) -> Vec<TextLine> {
     order.sort_by(|&a, &b| {
         let ba = words[a].base;
         let bb = words[b].base;
-        let cmp = ba.partial_cmp(&bb).unwrap_or(std::cmp::Ordering::Equal);
+        let cmp = ba.total_cmp(&bb);
         if cmp != std::cmp::Ordering::Equal {
             return cmp;
         }
         let pa = word_primary_min(&words[a]);
         let pb = word_primary_min(&words[b]);
-        pa.partial_cmp(&pb).unwrap_or(std::cmp::Ordering::Equal)
+        pa.total_cmp(&pb)
     });
 
     for &seed_idx in &order {
@@ -798,11 +798,8 @@ fn form_lines(words: Vec<TextWord>) -> Vec<TextLine> {
         }
 
         // Sort line words by primary coordinate
-        line_words.sort_by(|&a, &b| {
-            word_primary_min(&words[a])
-                .partial_cmp(&word_primary_min(&words[b]))
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
+        line_words
+            .sort_by(|&a, &b| word_primary_min(&words[a]).total_cmp(&word_primary_min(&words[b])));
 
         lines.push(make_line(
             line_words.iter().map(|&i| words[i].clone()).collect(),
@@ -810,11 +807,7 @@ fn form_lines(words: Vec<TextWord>) -> Vec<TextLine> {
     }
 
     // Sort lines by baseline (top to bottom for R0 = descending y)
-    lines.sort_by(|a, b| {
-        b.base
-            .partial_cmp(&a.base)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
+    lines.sort_by(|a, b| b.base.total_cmp(&a.base));
 
     lines
 }
@@ -945,12 +938,7 @@ fn form_blocks(lines: Vec<TextLine>) -> Vec<TextBlock> {
         }
 
         // Sort block lines by baseline (top to bottom for R0)
-        block_lines.sort_by(|&a, &b| {
-            lines[b]
-                .base
-                .partial_cmp(&lines[a].base)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
+        block_lines.sort_by(|&a, &b| lines[b].base.total_cmp(&lines[a].base));
 
         blocks.push(TextBlock {
             lines: block_lines.iter().map(|&i| lines[i].clone()).collect(),
@@ -979,7 +967,7 @@ fn detect_columns(blocks: &[TextBlock]) -> Vec<f64> {
 
     // Collect all block left edges
     let mut left_edges: Vec<f64> = blocks.iter().map(|b| b.x_min).collect();
-    left_edges.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    left_edges.sort_by(|a, b| a.total_cmp(b));
     left_edges.dedup_by(|a, b| (*a - *b).abs() < 1.0);
 
     // Check for column gaps: areas where no block occupies x space
@@ -1000,7 +988,7 @@ fn detect_columns(blocks: &[TextBlock]) -> Vec<f64> {
 
     // Find gaps between blocks along x-axis
     let mut x_ranges: Vec<(f64, f64)> = blocks.iter().map(|b| (b.x_min, b.x_max)).collect();
-    x_ranges.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+    x_ranges.sort_by(|a, b| a.0.total_cmp(&b.0));
 
     let mut columns = vec![x_ranges[0].0];
     let mut max_x = x_ranges[0].1;
@@ -1020,26 +1008,139 @@ fn detect_columns(blocks: &[TextBlock]) -> Vec<f64> {
 // TL10: Reading order
 // ---------------------------------------------------------------------------
 
-/// TL10: Sort blocks in reading order (top-to-bottom, left-to-right for LTR).
-fn sort_reading_order(blocks: &mut Vec<TextBlock>) {
-    blocks.sort_by(|a, b| {
-        // Primary: top edge (descending y = higher on page comes first)
-        let y_cmp = b
-            .y_max
-            .partial_cmp(&a.y_max)
-            .unwrap_or(std::cmp::Ordering::Equal);
-        if y_cmp != std::cmp::Ordering::Equal {
-            // Only use y-ordering if blocks don't overlap vertically
-            let overlap = a.y_max > b.y_min && b.y_max > a.y_min;
-            if !overlap {
-                return y_cmp;
-            }
-        }
-        // Secondary: left edge (ascending x)
-        a.x_min
-            .partial_cmp(&b.x_min)
-            .unwrap_or(std::cmp::Ordering::Equal)
+/// TL10: The vertical extent a block occupies for the purpose of banding.
+///
+/// A block's own extent is the wrong reach: a tall column block would overlap
+/// every short block beside *and below* it and pull them all into one band.
+/// Two blocks sit side by side when their topmost lines share a physical line,
+/// so that is what a band is measured against.
+///
+/// The topmost line is found by geometry rather than taken as `lines.first()`.
+/// `form_blocks` orders a block's lines by `base` descending, and `base` is
+/// rotation-relative - a horizontal coordinate for R90 and R270, reversed for
+/// R180 - so the first line is the highest one only for R0. Nothing produces a
+/// non-R0 block today, because `collect_chars` approximates every span as R0,
+/// which makes this a trap laid for whoever implements rotation detection
+/// rather than a live defect. Comparing `y_max` also drops the assumption that
+/// the highest baseline belongs to the line with the highest top edge.
+///
+/// A block with no lines falls back to its own extent.
+fn band_reach(block: &TextBlock) -> (f64, f64) {
+    let topmost = block.lines.iter().max_by(|a, b| {
+        a.y_max
+            .total_cmp(&b.y_max)
+            // Deepest first among equal tops, matching how `assign_bands`
+            // breaks its own ties.
+            .then_with(|| b.y_min.total_cmp(&a.y_min))
     });
+    match topmost {
+        Some(line) => (line.y_max, line.y_min),
+        None => (block.y_max, block.y_min),
+    }
+}
+
+/// TL10: Group blocks into horizontal bands of vertically overlapping lines.
+///
+/// Returns one band id per block, in the caller's order; ids increase down the
+/// page. Vertical overlap is symmetric but not transitive - A can overlap B
+/// and B overlap C while A and C are disjoint - so it cannot be asked pairwise
+/// inside a comparator. Anchoring each band on its topmost block makes band
+/// membership a partition of the blocks, and a partition is transitive by
+/// construction.
+///
+/// The trade-off this buys is that a block banded with a tall neighbour is
+/// emitted before blocks lower in its own column: on a two-column page whose
+/// right block spans two left ones, the order is left-top, right, left-bottom,
+/// where the previous comparator gave left-top, left-bottom, right. That does
+/// reach the output - `render_layout` emits one line per `TextLine` in block
+/// order, and only pads horizontally from coordinates - so this is a real
+/// change in reading order, accepted because it matches `pdftotext -layout` on
+/// the pages checked, not because it is invisible. Ordering whole columns
+/// ahead of rows needs the column boundaries `detect_columns` computes and
+/// currently discards, which is a larger change than this one.
+fn assign_bands(blocks: &[TextBlock]) -> Vec<usize> {
+    // Sweep top-down. `total_cmp` rather than `partial_cmp` so a degenerate
+    // page carrying a NaN coordinate still sorts.
+    let mut order: Vec<usize> = (0..blocks.len()).collect();
+    order.sort_by(|&a, &b| {
+        let (top_a, bottom_a) = band_reach(&blocks[a]);
+        let (top_b, bottom_b) = band_reach(&blocks[b]);
+        top_b
+            .total_cmp(&top_a)
+            // Which block seeds a band decides the partition, not just the
+            // order of a tie, so the key has to be fully geometric: two blocks
+            // starting on the same line are common - a heading and the body
+            // beside it - and leaving that tie to sort stability would hand
+            // the partition to the order the content stream drew them in. The
+            // deepest-reaching block seeds.
+            .then_with(|| bottom_a.total_cmp(&bottom_b))
+            .then_with(|| blocks[a].x_min.total_cmp(&blocks[b].x_min))
+    });
+
+    let mut bands = vec![usize::MAX; blocks.len()];
+    let mut band = 0usize;
+
+    for (n, &seed) in order.iter().enumerate() {
+        if bands[seed] != usize::MAX {
+            continue;
+        }
+        bands[seed] = band;
+        // Every later block in the sweep starts at or below the seed's top
+        // edge, so it shares the seed's line exactly when its own top edge is
+        // still above the seed's bottom edge. `order` is sorted by that top
+        // edge, so the first block that fails ends the scan: everything after
+        // it sits lower still.
+        let (_, seed_y_min) = band_reach(&blocks[seed]);
+        for &i in &order[n + 1..] {
+            // Written as "does it join?" rather than "is it below?" so that a
+            // NaN on either side ends the band: NaN compares false against
+            // everything, and the other spelling would instead run to the end
+            // of the page and pull every remaining block into this one band.
+            let joins = band_reach(&blocks[i]).0 > seed_y_min;
+            if !joins {
+                break;
+            }
+            // Breaking rather than skipping makes a band a contiguous run of
+            // `order`, so the scan never meets a block another band already
+            // took, and the outer loop's `continue` steps over the whole run.
+            debug_assert_eq!(bands[i], usize::MAX, "bands should not interleave");
+            bands[i] = band;
+        }
+        band += 1;
+    }
+
+    bands
+}
+
+/// TL10: Sort blocks in reading order (top-to-bottom, left-to-right for LTR).
+///
+/// Bands read top-to-bottom and the blocks within a band read left-to-right.
+/// Band membership is resolved up front by `assign_bands`, for the reason
+/// given there: deciding it pairwise inside this comparator instead is what
+/// made `sort_by` abort on real documents.
+fn sort_reading_order(blocks: &mut Vec<TextBlock>) {
+    let bands = assign_bands(blocks);
+
+    // Tagging and re-collecting moves the blocks instead of cloning them.
+    let mut tagged: Vec<(usize, TextBlock)> = bands.into_iter().zip(blocks.drain(..)).collect();
+    tagged.sort_by(|(band_a, a), (band_b, b)| banded_cmp((*band_a, a), (*band_b, b)));
+
+    blocks.extend(tagged.into_iter().map(|(_, block)| block));
+}
+
+/// TL10: Order two blocks that have already been assigned a band.
+///
+/// A total order: an integer comparison followed by two `total_cmp` calls, so
+/// it holds for every input a page can produce, NaN coordinates included.
+fn banded_cmp(a: (usize, &TextBlock), b: (usize, &TextBlock)) -> std::cmp::Ordering {
+    let (band_a, block_a) = a;
+    let (band_b, block_b) = b;
+    band_a
+        .cmp(&band_b)
+        .then_with(|| block_a.x_min.total_cmp(&block_b.x_min))
+        // Without a third key, blocks sharing a band and a left edge would come
+        // out in whatever order they happened to be built in.
+        .then_with(|| block_b.y_max.total_cmp(&block_a.y_max))
 }
 
 // ---------------------------------------------------------------------------
@@ -1769,6 +1870,369 @@ mod tests {
         ];
         sort_reading_order(&mut blocks);
         assert!(blocks[0].x_min < blocks[1].x_min); // left block first
+    }
+
+    /// Extents of 21 text blocks from page 8 of AEMO's Quarterly Energy
+    /// Dynamics Q2 2026, in the order the layout pipeline builds them; the
+    /// chart in the middle of that page is what issue #4 reported. Only the
+    /// geometry is reproduced here, no text - `[y_min, y_max, x_min, x_max]`.
+    ///
+    /// Minimised from the 40 blocks the page produces, by dropping every block
+    /// the abort still reproduced without. Source, retrieved 2026-08-30:
+    /// <https://www.aemo.com.au/-/media/files/major-publications/qed/2026/qed-q2-2026.pdf>
+    ///
+    /// Rows 10 to 12 are the cycle: block 10 sits above block 12 and so orders
+    /// before it, block 12 is left of block 11 and so orders before it, and
+    /// block 11 is left of block 10 and so orders before *it*. Asking whether
+    /// two blocks overlap vertically from inside the comparator - and picking
+    /// the y key or the x key on the answer - makes those three mutually
+    /// out-of-order, and `sort_by` aborts the process when it notices.
+    const QED_CHART_BLOCKS: [[f64; 4]; 21] = [
+        [588.9400, 598.9000, 45.3600, 534.2209],
+        [573.1000, 583.0600, 45.3600, 534.8507],
+        [557.2300, 567.1900, 45.3600, 542.1558],
+        [541.3900, 551.3500, 45.3600, 504.3313],
+        [525.4300, 535.3900, 45.3600, 331.2410],
+        [483.0700, 503.1100, 45.3600, 546.6700],
+        [458.4700, 481.0300, 45.3600, 545.8889],
+        [448.6300, 458.4700, 65.7120, 370.5270],
+        [435.8400, 447.7000, 65.7120, 279.3450],
+        [427.4200, 436.4200, 319.6100, 340.1120],
+        [414.3800, 433.8194, 65.7120, 314.1279],
+        [374.5200, 423.3174, 60.0000, 340.1120],
+        [191.3300, 201.2900, 45.3600, 447.9110],
+        [147.9800, 157.9400, 189.4100, 192.1789],
+        [127.7000, 136.2200, 45.3600, 363.2030],
+        [113.7800, 122.3000, 45.3600, 530.8930],
+        [104.6600, 111.6200, 52.4400, 487.5530],
+        [91.2240, 99.7440, 45.3600, 543.6898],
+        [82.1040, 89.0640, 52.4400, 422.3930],
+        [69.7440, 77.3040, 45.3600, 47.4541],
+        [25.1040, 51.1440, 45.0000, 551.4541],
+    ];
+
+    fn block_at(y_min: f64, y_max: f64, x_min: f64, x_max: f64) -> TextBlock {
+        TextBlock {
+            lines: vec![],
+            x_min,
+            x_max,
+            y_min,
+            y_max,
+            rotation: Rotation::R0,
+        }
+    }
+
+    #[test]
+    fn tl10_sorts_the_qed_chart_blocks() {
+        // One line per block, spanning the block: `band_reach` then reads the
+        // same numbers it would from the fallback, but through the `Some`
+        // branch that every block built by `form_blocks` takes.
+        let mut blocks: Vec<TextBlock> = QED_CHART_BLOCKS
+            .iter()
+            .map(|row| block_of_lines(std::slice::from_ref(row)))
+            .collect();
+
+        // Before the banding pass this aborted with "user-provided comparison
+        // function does not correctly implement a total order".
+        sort_reading_order(&mut blocks);
+
+        assert_eq!(blocks.len(), QED_CHART_BLOCKS.len());
+        // Top-of-page block first, bottom-of-page block last.
+        assert_eq!(blocks[0].y_max, 598.90);
+        assert_eq!(blocks[blocks.len() - 1].y_max, 51.1440);
+    }
+
+    /// Reading order must come from the geometry alone. `form_blocks` seeds
+    /// blocks in whatever order lines arrive, so feeding the same page in a
+    /// different order has to land on the same result.
+    #[test]
+    fn tl10_reading_order_ignores_the_order_blocks_were_built_in() {
+        let build = |rows: Vec<[f64; 4]>| -> Vec<TextBlock> {
+            rows.iter()
+                .map(|row| block_of_lines(std::slice::from_ref(row)))
+                .collect()
+        };
+        let key = |bs: &[TextBlock]| -> Vec<(u64, u64)> {
+            bs.iter()
+                .map(|b| (b.y_max.to_bits(), b.x_min.to_bits()))
+                .collect()
+        };
+
+        let mut forwards = build(QED_CHART_BLOCKS.to_vec());
+        sort_reading_order(&mut forwards);
+
+        let mut backwards = build(QED_CHART_BLOCKS.iter().rev().copied().collect());
+        sort_reading_order(&mut backwards);
+
+        // Interleave the two halves, so neither input order resembles the other.
+        let mut shuffled_rows = Vec::new();
+        let (head, tail) = QED_CHART_BLOCKS.split_at(QED_CHART_BLOCKS.len() / 2);
+        for i in 0..head.len().max(tail.len()) {
+            if let Some(row) = tail.get(i) {
+                shuffled_rows.push(*row);
+            }
+            if let Some(row) = head.get(i) {
+                shuffled_rows.push(*row);
+            }
+        }
+        let mut shuffled = build(shuffled_rows);
+        sort_reading_order(&mut shuffled);
+
+        assert_eq!(key(&forwards), key(&backwards));
+        assert_eq!(key(&forwards), key(&shuffled));
+    }
+
+    /// A two-column page whose right block spans both left blocks. The band
+    /// rule emits left-top, right, left-bottom; the previous comparator gave
+    /// left-top, left-bottom, right. Block order is the order lines are
+    /// rendered in, so this pins a real difference in output rather than an
+    /// internal detail. It is accepted because it is the order
+    /// `pdftotext -layout` produces for pages of this shape.
+    #[test]
+    fn tl10_two_column_page_with_a_spanning_right_block() {
+        let mut blocks = vec![
+            // Left column, upper half.
+            block_of_lines(&[[690.0, 700.0, 50.0, 250.0], [600.0, 610.0, 50.0, 250.0]]),
+            // Left column, lower half.
+            block_of_lines(&[[590.0, 600.0, 50.0, 250.0], [500.0, 510.0, 50.0, 250.0]]),
+            // Right column, spanning both.
+            block_of_lines(&[[690.0, 700.0, 300.0, 550.0], [500.0, 510.0, 300.0, 550.0]]),
+        ];
+        sort_reading_order(&mut blocks);
+
+        assert_eq!((blocks[0].x_min, blocks[0].y_max), (50.0, 700.0));
+        assert_eq!((blocks[1].x_min, blocks[1].y_max), (300.0, 700.0));
+        assert_eq!((blocks[2].x_min, blocks[2].y_max), (50.0, 600.0));
+    }
+
+    /// Build a block whose lines are the given `[y_min, y_max, x_min, x_max]`
+    /// rows, topmost first, with the block extent spanning all of them.
+    fn block_of_lines(rows: &[[f64; 4]]) -> TextBlock {
+        let lines: Vec<TextLine> = rows
+            .iter()
+            .map(|&[y_min, y_max, x_min, x_max]| TextLine {
+                words: vec![],
+                x_min,
+                x_max,
+                y_min,
+                y_max,
+                base: y_min,
+                rotation: Rotation::R0,
+            })
+            .collect();
+        TextBlock {
+            x_min: lines.iter().map(|l| l.x_min).fold(f64::INFINITY, f64::min),
+            x_max: lines
+                .iter()
+                .map(|l| l.x_max)
+                .fold(f64::NEG_INFINITY, f64::max),
+            y_min: lines.iter().map(|l| l.y_min).fold(f64::INFINITY, f64::min),
+            y_max: lines
+                .iter()
+                .map(|l| l.y_max)
+                .fold(f64::NEG_INFINITY, f64::max),
+            lines,
+            rotation: Rotation::R0,
+        }
+    }
+
+    /// A tall block must not drag the rows below it into its own band.
+    #[test]
+    fn tl10_tall_block_does_not_swallow_the_rows_beside_it() {
+        // A column block spanning three rows, and two short blocks to its
+        // left: one level with its first line, one well below.
+        let mut blocks = vec![
+            block_of_lines(&[
+                [690.0, 700.0, 300.0, 500.0],
+                [645.0, 655.0, 300.0, 500.0],
+                [600.0, 610.0, 300.0, 500.0],
+            ]),
+            block_of_lines(&[[690.0, 700.0, 50.0, 200.0]]),
+            block_of_lines(&[[610.0, 620.0, 50.0, 200.0]]),
+        ];
+        sort_reading_order(&mut blocks);
+
+        // Row one reads left to right, then the block that is genuinely lower.
+        assert_eq!((blocks[0].x_min, blocks[0].y_max), (50.0, 700.0));
+        assert_eq!((blocks[1].x_min, blocks[1].y_max), (300.0, 700.0));
+        assert_eq!((blocks[2].x_min, blocks[2].y_max), (50.0, 620.0));
+    }
+
+    /// Two blocks sharing a top edge, one reaching deeper than the other.
+    /// Which of them seeds the band decides whether the block below joins that
+    /// band or opens the next one, so a tie must not be settled by the order
+    /// the blocks were built in.
+    #[test]
+    fn tl10_tied_top_edges_do_not_depend_on_build_order() {
+        let deep: &[[f64; 4]] = &[[680.0, 700.0, 50.0, 200.0]];
+        let shallow: &[[f64; 4]] = &[[690.0, 700.0, 300.0, 450.0]];
+        // Inside the deep block's reach, past the shallow one's.
+        let below: &[[f64; 4]] = &[[675.0, 685.0, 60.0, 210.0]];
+
+        let key = |bs: &[TextBlock]| -> Vec<(u64, u64)> {
+            bs.iter()
+                .map(|b| (b.y_max.to_bits(), b.x_min.to_bits()))
+                .collect()
+        };
+        let sorted = |rows: [&[[f64; 4]]; 3]| -> Vec<(u64, u64)> {
+            let mut blocks: Vec<TextBlock> = rows.iter().map(|r| block_of_lines(r)).collect();
+            sort_reading_order(&mut blocks);
+            key(&blocks)
+        };
+
+        let expected = sorted([deep, shallow, below]);
+        for rows in [
+            [deep, below, shallow],
+            [shallow, deep, below],
+            [shallow, below, deep],
+            [below, deep, shallow],
+            [below, shallow, deep],
+        ] {
+            assert_eq!(sorted(rows), expected);
+        }
+    }
+
+    /// `total_cmp` ranks a positive NaN above every finite top edge, so a block
+    /// carrying one seeds the first band. It must not take the page with it.
+    #[test]
+    fn tl10_nan_block_does_not_swallow_the_page() {
+        let mut blocks = vec![
+            block_of_lines(&[[f64::NAN, f64::NAN, 500.0, 550.0]]),
+            block_of_lines(&[[690.0, 700.0, 50.0, 200.0]]),
+            block_of_lines(&[[590.0, 600.0, 50.0, 200.0]]),
+            block_of_lines(&[[490.0, 500.0, 50.0, 200.0]]),
+        ];
+
+        let bands = assign_bands(&blocks);
+        let rows: std::collections::BTreeSet<usize> = bands[1..].iter().copied().collect();
+        assert_eq!(
+            rows.len(),
+            3,
+            "three rows should stay three bands: {bands:?}"
+        );
+
+        sort_reading_order(&mut blocks);
+        assert_eq!(blocks.len(), 4);
+    }
+
+    // --- TL10: the comparator is a strict weak ordering ---
+
+    proptest::proptest! {
+        /// `sort_by` aborts the process unless its comparator is a strict weak
+        /// ordering, so check the four laws directly over the coordinates a
+        /// broken comparator trips on: NaN, the infinities, both zeroes,
+        /// duplicates, and clusters a hair apart.
+        #[test]
+        fn tl10_banded_cmp_is_a_strict_weak_ordering(
+            triples in proptest::collection::vec(
+                (0usize..4, awkward_coord(), awkward_coord()),
+                3..24,
+            )
+        ) {
+            use std::cmp::Ordering;
+
+            let blocks: Vec<(usize, TextBlock)> = triples
+                .iter()
+                .map(|&(band, x_min, y_max)| {
+                    (band, block_at(y_max - 10.0, y_max, x_min, x_min + 10.0))
+                })
+                .collect();
+            let cmp = |a: &(usize, TextBlock), b: &(usize, TextBlock)| {
+                banded_cmp((a.0, &a.1), (b.0, &b.1))
+            };
+            let lt = |a, b| cmp(a, b) == Ordering::Less;
+            let eq = |a, b| cmp(a, b) == Ordering::Equal;
+
+            for a in &blocks {
+                // Irreflexivity.
+                proptest::prop_assert!(!lt(a, a));
+
+                for b in &blocks {
+                    // Asymmetry, and a consistent verdict either way round.
+                    proptest::prop_assert_eq!(cmp(a, b), cmp(b, a).reverse());
+
+                    for c in &blocks {
+                        // Transitivity of the ordering.
+                        if lt(a, b) && lt(b, c) {
+                            proptest::prop_assert!(lt(a, c));
+                        }
+                        // Transitivity of the induced equivalence.
+                        if eq(a, b) && eq(b, c) {
+                            proptest::prop_assert!(eq(a, c));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    proptest::proptest! {
+        /// `assign_bands` runs a sort of its own and then decides the
+        /// partition, so push the same hostile coordinates through the whole
+        /// pass rather than through `banded_cmp` alone: it must come back with
+        /// exactly the blocks it was handed.
+        #[test]
+        fn tl10_sort_reading_order_survives_awkward_coordinates(
+            rows in proptest::collection::vec(
+                (awkward_coord(), awkward_coord(), proptest::bool::ANY),
+                1..24,
+            )
+        ) {
+            let blocks: Vec<TextBlock> = rows
+                .iter()
+                .map(|&(x_min, y_max, with_lines)| {
+                    // Both branches of `band_reach`: a block carrying lines
+                    // bands on its first line, one without falls back to its
+                    // own extent.
+                    if with_lines {
+                        block_of_lines(&[[y_max - 10.0, y_max, x_min, x_min + 10.0]])
+                    } else {
+                        block_at(y_max - 10.0, y_max, x_min, x_min + 10.0)
+                    }
+                })
+                .collect();
+
+            let bits = |bs: &[TextBlock]| -> Vec<(u64, u64)> {
+                let mut v: Vec<(u64, u64)> = bs
+                    .iter()
+                    .map(|b| (b.y_max.to_bits(), b.x_min.to_bits()))
+                    .collect();
+                v.sort_unstable();
+                v
+            };
+
+            let mut sorted = blocks.clone();
+            sort_reading_order(&mut sorted);
+
+            proptest::prop_assert_eq!(sorted.len(), blocks.len());
+            proptest::prop_assert_eq!(bits(&sorted), bits(&blocks));
+        }
+    }
+
+    /// Coordinates chosen to break naive comparators: a small pool of
+    /// duplicate-prone values, near-epsilon neighbours, both signed zeroes,
+    /// both infinities and NaN.
+    fn awkward_coord() -> impl proptest::strategy::Strategy<Value = f64> {
+        proptest::prop_oneof![
+            proptest::sample::select(vec![
+                0.0,
+                -0.0,
+                f64::INFINITY,
+                f64::NEG_INFINITY,
+                f64::NAN,
+                -f64::NAN,
+            ]),
+            proptest::sample::select(vec![
+                100.0,
+                // The true neighbour of 100.0. `100.0 + f64::EPSILON` is not
+                // it: EPSILON is the ulp at 1.0, ~64 times finer than the ulp
+                // at 100, so that expression rounds straight back to 100.0.
+                f64::from_bits(100.0f64.to_bits() + 1),
+                100.000_000_1,
+                100.5,
+            ]),
+            (-500.0f64..500.0),
+        ]
     }
 
     // --- TL11: RTL detection ---
