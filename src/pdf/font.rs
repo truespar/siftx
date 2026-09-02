@@ -47,6 +47,8 @@ pub struct PdfFont {
     pub font_matrix_scale: f64,
 }
 
+pub type LoadedFont = (Vec<u8>, Option<(u32, u16)>, PdfFont);
+
 /// FE1: Parse a font dictionary from a resolved PdfObject.
 pub fn parse_font(doc: &Document, font_obj: &PdfObject) -> Result<PdfFont> {
     let subtype = font_obj
@@ -140,7 +142,7 @@ pub fn parse_font(doc: &Document, font_obj: &PdfObject) -> Result<PdfFont> {
 }
 
 /// Load all fonts from a page's /Resources /Font dictionary.
-pub fn load_page_fonts(doc: &Document, resources: Option<&PdfObject>) -> Vec<(Vec<u8>, PdfFont)> {
+pub fn load_page_fonts(doc: &Document, resources: Option<&PdfObject>) -> Vec<LoadedFont> {
     let mut fonts = Vec::new();
 
     let resources = match resources {
@@ -161,9 +163,13 @@ pub fn load_page_fonts(doc: &Document, resources: Option<&PdfObject>) -> Vec<(Ve
 
     if let Some(entries) = font_dict.as_dict() {
         for (key, val) in entries {
+            // The font object's identity, so the interpreter can key fonts
+            // uniquely: two scopes may bind the same name (e.g. /F5) to
+            // different font objects.
+            let obj_ref = val.as_ref().map(|r| (r.num, r.generation));
             if let Ok(resolved) = doc.resolve_obj(val) {
                 if let Ok(font) = parse_font(doc, &resolved) {
-                    fonts.push((key.clone(), font));
+                    fonts.push((key.clone(), obj_ref, font));
                 }
             }
         }

@@ -94,7 +94,7 @@ pub struct PositionedChar {
     pub height: f64,
     /// Effective font size in user space.
     pub font_size: f64,
-    /// Font resource name.
+    /// Unique font key (resource name plus font object identity).
     pub font_name: Vec<u8>,
     /// Rendering mode (0-7; 3 = invisible).
     pub render_mode: u8,

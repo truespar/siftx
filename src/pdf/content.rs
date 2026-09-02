@@ -27,7 +27,9 @@ const DEFAULT_GLYPH_WIDTH: f64 = 600.0;
 pub struct TextSpan {
     /// Raw bytes (not yet Unicode - font decoding is a later phase).
     pub text: Vec<u8>,
-    /// Font resource name from Tf (e.g. b"F1").
+    /// Unique font key (resource name plus font object identity), resolving
+    /// into the font map returned by `process_page`. Not the bare Tf name:
+    /// two scopes may bind the same name to different fonts.
     pub font_name: Vec<u8>,
     /// Font size from Tf.
     pub font_size: f64,
@@ -172,8 +174,16 @@ pub struct ContentInterpreter<'a> {
     spans: Vec<TextSpan>,
     /// CS21: Form XObject recursion depth.
     xobject_depth: u32,
-    /// Page fonts for accurate glyph width computation.
+    /// Every font seen on the page, keyed by a unique font key (accumulate
+    /// only, never restored). Spans reference these keys, so the layout
+    /// engine can decode text after interpretation without name collisions.
     fonts: HashMap<Vec<u8>, PdfFont>,
+    /// Resource-name scope: font name as written in the content stream
+    /// (e.g. b"F5") to unique key in `fonts`. Saved and restored around
+    /// nested content streams, which may rebind a name to another font.
+    scope: HashMap<Vec<u8>, Vec<u8>>,
+    /// Uniquifier for fonts defined as direct objects (no object ref).
+    direct_font_seq: u32,
     /// OCG object references that are off by default (for filtering).
     off_ocgs: std::collections::HashSet<(u32, u16)>,
 }
@@ -1003,9 +1013,6 @@ impl<'a> ContentInterpreter<'a> {
         doc: &'a Document<'a>,
         page: &Page,
     ) -> Result<(Vec<TextSpan>, HashMap<Vec<u8>, PdfFont>)> {
-        let page_fonts = font::load_page_fonts(doc, page.resources.as_ref());
-        let font_map: HashMap<Vec<u8>, PdfFont> = page_fonts.into_iter().collect();
-
         let off_ocgs = doc.off_ocg_refs();
 
         let mut interp = Self {
@@ -1015,9 +1022,12 @@ impl<'a> ContentInterpreter<'a> {
             operands: Vec::new(),
             spans: Vec::new(),
             xobject_depth: 0,
-            fonts: font_map,
+            fonts: HashMap::new(),
+            scope: HashMap::new(),
+            direct_font_seq: 0,
             off_ocgs,
         };
+        interp.register_fonts(font::load_page_fonts(doc, page.resources.as_ref()), None);
 
         let content_data = interp.get_page_content(page)?;
         let resources = page.resources.as_ref();
@@ -1030,6 +1040,36 @@ impl<'a> ContentInterpreter<'a> {
 
         let fonts = interp.fonts;
         Ok((interp.spans, fonts))
+    }
+
+    /// Bind fonts from one resource dictionary into the current name scope.
+    /// The key is unique per font object, so same-named fonts from different
+    /// resource scopes (page vs form XObject) never collide in `self.fonts`.
+    ///
+    /// `host_ref` identifies the object owning the resource dictionary (a
+    /// form XObject or appearance stream). A font defined as a direct object
+    /// has no ref of its own, so it is keyed by its host: stable across
+    /// repeated `Do` of the same form, which keeps `self.fonts` bounded and
+    /// keeps span grouping intact. Only a host without a ref (the page
+    /// itself, registered once) falls back to a sequence number.
+    fn register_fonts(&mut self, loaded: Vec<font::LoadedFont>, host_ref: Option<(u32, u16)>) {
+        for (name, obj_ref, font) in loaded {
+            let mut key = name.clone();
+            match (obj_ref, host_ref) {
+                (Some((num, generation)), _) => {
+                    key.extend_from_slice(format!("#{num}_{generation}").as_bytes());
+                }
+                (None, Some((num, generation))) => {
+                    key.extend_from_slice(format!("#r{num}_{generation}").as_bytes());
+                }
+                (None, None) => {
+                    key.extend_from_slice(format!("#d{}", self.direct_font_seq).as_bytes());
+                    self.direct_font_seq += 1;
+                }
+            }
+            self.fonts.entry(key.clone()).or_insert(font);
+            self.scope.insert(name, key);
+        }
     }
 
     /// Process annotation appearance streams to extract text from FreeText
@@ -1082,7 +1122,8 @@ impl<'a> ContentInterpreter<'a> {
                 });
 
             if let Some(n) = ap.dict_get(b"N") {
-                self.process_appearance_text(n, rect.as_ref());
+                let appearance_ref = n.as_ref().map(|r| (r.num, r.generation));
+                self.process_appearance_text(n, appearance_ref, rect.as_ref());
             }
         }
     }
@@ -1090,7 +1131,12 @@ impl<'a> ContentInterpreter<'a> {
     /// Process a single appearance stream (Form XObject) for text extraction.
     /// `annot_rect` is the annotation's /Rect on the page, used to map
     /// from BBox space to page space per PDF spec §12.5.5.
-    fn process_appearance_text(&mut self, appearance: &PdfObject, annot_rect: Option<&[f64; 4]>) {
+    fn process_appearance_text(
+        &mut self,
+        appearance: &PdfObject,
+        appearance_ref: Option<(u32, u16)>,
+        annot_rect: Option<&[f64; 4]>,
+    ) {
         let form_obj = match self.doc.resolve_obj(appearance) {
             Ok(obj) => obj,
             Err(_) => return,
@@ -1187,17 +1233,20 @@ impl<'a> ContentInterpreter<'a> {
             .and_then(|r| self.doc.resolve_obj(r).ok());
         let resources_ref = form_resources.as_ref();
 
-        // Load fonts from the appearance stream's resources.
-        // Unlike form XObjects, annotation fonts are kept (not restored)
-        // so they remain available for text decoding by the layout engine.
+        // Scope the appearance stream's font-name bindings like a form
+        // XObject. The fonts accumulate in self.fonts under unique keys, so
+        // they stay available for text decoding by the layout engine.
+        let saved_scope = self.scope.clone();
         if form_resources.is_some() {
-            let form_fonts = font::load_page_fonts(self.doc, resources_ref);
-            for (name, font) in form_fonts {
-                self.fonts.insert(name, font);
-            }
+            self.register_fonts(
+                font::load_page_fonts(self.doc, resources_ref),
+                appearance_ref,
+            );
         }
 
         let _ = self.run(&content_data, resources_ref);
+
+        self.scope = saved_scope;
 
         self.current = self.state_stack.pop().unwrap_or_default();
     }
@@ -1214,6 +1263,8 @@ impl<'a> ContentInterpreter<'a> {
             spans: Vec::new(),
             xobject_depth: 0,
             fonts: HashMap::new(),
+            scope: HashMap::new(),
+            direct_font_seq: 0,
             off_ocgs: std::collections::HashSet::new(),
         };
         let content_data = interp.get_page_content(page)?;
@@ -1497,7 +1548,14 @@ impl<'a> ContentInterpreter<'a> {
         }
         let n = self.operands.len();
         if let Some(name) = self.operands[n - 2].as_name() {
-            self.current.text.font_name = name.to_vec();
+            // Resolve the resource name through the current scope to the
+            // unique font key. Fall back to the bare name for fonts that
+            // never went through register_fonts (missing resources).
+            self.current.text.font_name = self
+                .scope
+                .get(name)
+                .cloned()
+                .unwrap_or_else(|| name.to_vec());
         }
         self.current.text.font_size = self.operands[n - 1].as_f64().unwrap_or(12.0);
         Ok(())
@@ -1815,7 +1873,10 @@ impl<'a> ContentInterpreter<'a> {
             .unwrap_or("");
 
         match subtype {
-            "Form" => self.process_form_xobject(&xobj)?,
+            "Form" => {
+                let xobj_id = xobj_ref.as_ref().map(|r| (r.num, r.generation));
+                self.process_form_xobject(&xobj, xobj_id)?
+            }
             // "Image" - handled in image extraction phase, skip here
             _ => {}
         }
@@ -1893,7 +1954,11 @@ impl<'a> ContentInterpreter<'a> {
     }
 
     /// CS21: Recursively process a Form XObject's content stream.
-    fn process_form_xobject(&mut self, xobj: &PdfObject) -> Result<()> {
+    fn process_form_xobject(
+        &mut self,
+        xobj: &PdfObject,
+        xobj_id: Option<(u32, u16)>,
+    ) -> Result<()> {
         if self.xobject_depth >= MAX_XOBJECT_DEPTH {
             return Ok(()); // Prevent infinite recursion
         }
@@ -1943,35 +2008,26 @@ impl<'a> ContentInterpreter<'a> {
 
         let resources_ref = form_resources.as_ref();
 
-        // Load Form XObject fonts and temporarily merge into font map
-        let saved_fonts = if form_resources.is_some() {
-            let form_fonts = font::load_page_fonts(self.doc, resources_ref);
-            let old_fonts = self.fonts.clone();
-            for (name, font) in form_fonts {
-                self.fonts.insert(name, font);
-            }
-            Some(old_fonts)
-        } else {
-            None
-        };
+        // The form's own resources may rebind a font name the page also uses
+        // (e.g. both call different fonts /F5), so scope the name bindings to
+        // this stream. The fonts themselves accumulate in self.fonts under
+        // unique keys and stay available for span decoding.
+        let saved_scope = self.scope.clone();
+        if form_resources.is_some() {
+            self.register_fonts(font::load_page_fonts(self.doc, resources_ref), xobj_id);
+        }
 
         self.xobject_depth += 1;
-        self.run(&stream_data, resources_ref)?;
+        let run_result = self.run(&stream_data, resources_ref);
         self.xobject_depth -= 1;
 
-        // Restore page-level fonts, but keep Form XObject fonts for names not on the page
-        if let Some(old) = saved_fonts {
-            let form_fonts = std::mem::replace(&mut self.fonts, old);
-            for (name, font) in form_fonts {
-                self.fonts.entry(name).or_insert(font);
-            }
-        }
+        self.scope = saved_scope;
 
         if let Some(state) = self.state_stack.pop() {
             self.current = state;
         }
 
-        Ok(())
+        run_result
     }
 }
 
@@ -2569,7 +2625,190 @@ mod tests {
             spans: Vec::new(),
             xobject_depth: 0,
             fonts: HashMap::new(),
+            scope: HashMap::new(),
+            direct_font_seq: 0,
             off_ocgs: std::collections::HashSet::new(),
         }
+    }
+
+    // --- CS22: font-name collision across resource scopes ---
+
+    fn tounicode(map_c4: &str) -> Vec<u8> {
+        format!(
+            "/CIDInit /ProcSet findresource begin\n12 dict begin\nbegincmap\n\
+             /CMapName /T def\n/CMapType 2 def\n\
+             1 begincodespacerange\n<00> <FF>\nendcodespacerange\n\
+             1 beginbfrange\n<41> <5A> <0041>\nendbfrange\n\
+             1 beginbfchar\n<C4> <{map_c4}>\nendbfchar\n\
+             endcmap\nCMapName currentdict /CMap defineresource pop\nend end"
+        )
+        .into_bytes()
+    }
+
+    fn stream_obj(dict_extra: &str, data: &[u8]) -> Vec<u8> {
+        let mut v = format!("<<{dict_extra}/Length {}>>\nstream\n", data.len()).into_bytes();
+        v.extend_from_slice(data);
+        v.extend_from_slice(b"\nendstream");
+        v
+    }
+
+    fn assemble_pdf(objs: &[Vec<u8>]) -> Vec<u8> {
+        let mut out: Vec<u8> = b"%PDF-1.4\n".to_vec();
+        let mut offsets = Vec::new();
+        for (i, obj) in objs.iter().enumerate() {
+            offsets.push(out.len());
+            out.extend_from_slice(format!("{} 0 obj\n", i + 1).as_bytes());
+            out.extend_from_slice(obj);
+            out.extend_from_slice(b"\nendobj\n");
+        }
+        let xref_pos = out.len();
+        out.extend_from_slice(
+            format!("xref\n0 {}\n0000000000 65535 f \n", objs.len() + 1).as_bytes(),
+        );
+        for off in offsets {
+            out.extend_from_slice(format!("{off:010} 00000 n \n").as_bytes());
+        }
+        out.extend_from_slice(
+            format!(
+                "trailer\n<</Size {}/Root 1 0 R>>\nstartxref\n{}\n%%EOF\n",
+                objs.len() + 1,
+                xref_pos
+            )
+            .as_bytes(),
+        );
+        out
+    }
+
+    /// PDF where the page and a form XObject both bind /F5, to different
+    /// fonts: the page's maps 0xC4 -> 'b', the form's maps 0xC4 -> U+00C4.
+    /// The form draws (L\xC4SKOPIA).
+    fn build_f5_collision_pdf() -> Vec<u8> {
+        let objs: Vec<Vec<u8>> = vec![
+            b"<</Type/Catalog/Pages 2 0 R>>".to_vec(),
+            b"<</Type/Pages/Kids[3 0 R]/Count 1>>".to_vec(),
+            b"<</Type/Page/Parent 2 0 R/MediaBox[0 0 612 792]/Contents 4 0 R\
+              /Resources<</Font<</F5 6 0 R>>/XObject<</Fm1 8 0 R>>>>>>"
+                .to_vec(),
+            stream_obj("", b"BT /F5 12 Tf 50 700 Td (PAGETEXT) Tj ET\nq /Fm1 Do Q"),
+            stream_obj("", &tounicode("0062")), // page /F5: 0xC4 -> 'b'
+            b"<</Type/Font/Subtype/Type1/BaseFont/Helvetica/ToUnicode 5 0 R>>".to_vec(),
+            b"<</Type/Font/Subtype/Type1/BaseFont/Helvetica/ToUnicode 9 0 R>>".to_vec(),
+            stream_obj(
+                "/Subtype/Form/BBox[0 0 612 792]/Resources<</Font<</F5 7 0 R>>>>",
+                b"BT /F5 12 Tf 50 600 Td (L\xC4SKOPIA) Tj ET",
+            ),
+            stream_obj("", &tounicode("00C4")), // form /F5: 0xC4 -> U+00C4
+        ];
+        assemble_pdf(&objs)
+    }
+
+    /// PDF whose form XObject defines /F5 as a DIRECT font dict (no object
+    /// ref of its own) and is `Do`'d twice. The direct font must get one
+    /// stable key derived from the form's ref, not one key per invocation.
+    fn build_direct_font_double_do_pdf() -> Vec<u8> {
+        let objs: Vec<Vec<u8>> = vec![
+            b"<</Type/Catalog/Pages 2 0 R>>".to_vec(),
+            b"<</Type/Pages/Kids[3 0 R]/Count 1>>".to_vec(),
+            b"<</Type/Page/Parent 2 0 R/MediaBox[0 0 612 792]/Contents 4 0 R\
+              /Resources<</XObject<</Fm1 5 0 R>>>>>>"
+                .to_vec(),
+            stream_obj("", b"q /Fm1 Do Q q 1 0 0 1 200 0 cm /Fm1 Do Q"),
+            stream_obj(
+                "/Subtype/Form/BBox[0 0 612 792]/Resources<</Font<</F5\
+                 <</Type/Font/Subtype/Type1/BaseFont/Helvetica/ToUnicode 6 0 R>>>>>>",
+                b"BT /F5 12 Tf 50 600 Td (L\xC4SKOPIA) Tj ET",
+            ),
+            stream_obj("", &tounicode("00C4")),
+        ];
+        assemble_pdf(&objs)
+    }
+
+    fn build_annotation_font_collision_pdf() -> Vec<u8> {
+        let objs: Vec<Vec<u8>> = vec![
+            b"<</Type/Catalog/Pages 2 0 R>>".to_vec(),
+            b"<</Type/Pages/Kids[3 0 R]/Count 1>>".to_vec(),
+            b"<</Type/Page/Parent 2 0 R/MediaBox[0 0 612 792]/Contents 4 0 R\
+              /Resources<</Font<</F5 6 0 R>>>>/Annots[8 0 R]>>"
+                .to_vec(),
+            stream_obj("", b"BT /F5 12 Tf 50 700 Td (P\xC4GE) Tj ET"),
+            stream_obj("", &tounicode("0062")),
+            b"<</Type/Font/Subtype/Type1/BaseFont/Helvetica/ToUnicode 5 0 R>>".to_vec(),
+            b"<</Type/Font/Subtype/Type1/BaseFont/Helvetica/ToUnicode 10 0 R>>".to_vec(),
+            b"<</Type/Annot/Subtype/FreeText/Rect[0 0 100 100]/AP<</N 9 0 R>>>>".to_vec(),
+            stream_obj(
+                "/Subtype/Form/BBox[0 0 100 100]/Resources<</Font<</F5 7 0 R>>>>",
+                b"BT /F5 12 Tf 5 50 Td (L\xC4SKOPIA) Tj ET",
+            ),
+            stream_obj("", &tounicode("00C4")),
+        ];
+        assemble_pdf(&objs)
+    }
+
+    #[test]
+    fn cs22_form_font_name_collision_keeps_scopes_apart() {
+        let pdf = build_f5_collision_pdf();
+        let doc = Document::parse(&pdf).unwrap();
+        let page = doc.page(0).unwrap();
+        let (spans, fonts) = ContentInterpreter::process_page(&doc, &page).unwrap();
+
+        // The form's span must decode through the form's /F5 (0xC4 -> U+00C4),
+        // not the page's /F5 (0xC4 -> 'b').
+        let form_span = spans
+            .iter()
+            .find(|s| s.text.contains(&0xC4))
+            .expect("form span with 0xC4 byte");
+        let font = fonts
+            .get(&form_span.font_name)
+            .expect("form span font key resolves");
+        let decoded = font
+            .to_unicode
+            .as_ref()
+            .expect("form font has ToUnicode")
+            .lookup(0xC4)
+            .expect("0xC4 mapped");
+        assert_eq!(decoded, "\u{00C4}");
+
+        // The page's own span still decodes through the page's /F5.
+        let page_span = spans
+            .iter()
+            .find(|s| s.text.starts_with(b"PAGETEXT"))
+            .expect("page span");
+        let page_font = fonts.get(&page_span.font_name).expect("page font key");
+        assert_eq!(
+            page_font.to_unicode.as_ref().unwrap().lookup(0xC4).unwrap(),
+            "b"
+        );
+    }
+
+    #[test]
+    fn cs22_direct_font_key_stable_across_repeated_do() {
+        let pdf = build_direct_font_double_do_pdf();
+        let doc = Document::parse(&pdf).unwrap();
+        let page = doc.page(0).unwrap();
+        let (spans, fonts) = ContentInterpreter::process_page(&doc, &page).unwrap();
+
+        let form_spans: Vec<_> = spans.iter().filter(|s| s.text.contains(&0xC4)).collect();
+        assert_eq!(form_spans.len(), 2, "form drawn twice");
+        assert_eq!(
+            form_spans[0].font_name, form_spans[1].font_name,
+            "same direct font must keep one key across repeated Do"
+        );
+        let font = fonts
+            .get(&form_spans[0].font_name)
+            .expect("font key resolves");
+        assert_eq!(
+            font.to_unicode.as_ref().unwrap().lookup(0xC4).unwrap(),
+            "\u{00C4}"
+        );
+    }
+
+    #[test]
+    fn cs22_annotation_font_name_collision_keeps_scopes_apart() {
+        let pdf = build_annotation_font_collision_pdf();
+        let doc = Document::parse(&pdf).unwrap();
+        let page = doc.page(0).unwrap();
+        let text = crate::pdf::text_layout::extract_text_raw(&doc, &page).unwrap();
+
+        assert_eq!(text, "PbGEL\u{00C4}SKOPIA");
     }
 }
