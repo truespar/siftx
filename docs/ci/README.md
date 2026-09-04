@@ -9,6 +9,14 @@ would be billed. They are not: this repository is public, and public
 repositories run on standard runners for free. The per-minute multipliers
 below still apply to a private fork.
 
+**Actions is currently disabled for this repository.** The workflow files are
+in place, but nothing runs until Actions is switched on under
+*Settings -> Actions -> General*. Everything below describes what will happen
+then; today, the checks are the local ones. Dependabot is a separate system and
+is not held back by that switch - the config in
+[`.github/dependabot.yml`](../../.github/dependabot.yml) took effect when it
+landed on `main`.
+
 ## Running the same checks locally, for free
 
 `scripts/check.sh` (or `scripts/check.ps1` on Windows) runs everything the
