@@ -6,12 +6,27 @@
 # in the repository's security settings, not in this file.
 #
 # https://github.blog/security/supply-chain-security/tame-dependabot-group-your-updates-slow-the-cadence-keep-security-fast/
+# ---------------------------------------------------------------------------
+# PAUSED. Every ecosystem below carries `open-pull-requests-limit: 0`, which is
+# how Dependabot is told to stop opening version-update pull requests without
+# throwing away the configuration that says what it should update and how.
+#
+# To resume: delete the five `open-pull-requests-limit: 0` lines and this
+# banner. The cargo entry had a limit of 5 before it was paused; restore that
+# one rather than dropping it, since that entry covers four directories.
+#
+# Version updates only. Security updates are a separate mechanism, are not
+# shaped by this file, and are unaffected by the lines below - an advisory
+# still opens its own pull request the day it lands.
+# ---------------------------------------------------------------------------
+
 version: 2
 updates:
   # The workflows pin their actions by major tag. Nothing bumps those without
   # this, so they rot quietly - which is the failure mode worth covering, more
   # than the six runtime crates below.
   - package-ecosystem: github-actions
+    open-pull-requests-limit: 0  # paused - see banner above
     directory: "/"
     schedule:
       interval: monthly
@@ -28,6 +43,7 @@ updates:
   # separate crates, each with its own Cargo.lock. CI builds all of them, so a
   # dependency that rots in any of them is a red tick with nothing to bump it.
   - package-ecosystem: cargo
+    open-pull-requests-limit: 0  # paused - see banner above
     directories:
       - "/"
       - "/fuzz"
@@ -43,10 +59,10 @@ updates:
       cargo:
         patterns:
           - "*"
-    open-pull-requests-limit: 5
 
   # The other three ecosystems CI now builds and tests on every pull request.
   - package-ecosystem: npm
+    open-pull-requests-limit: 0  # paused - see banner above
     directory: "/bindings/nodejs"
     schedule:
       interval: monthly
@@ -64,6 +80,7 @@ updates:
           - "*"
 
   - package-ecosystem: maven
+    open-pull-requests-limit: 0  # paused - see banner above
     directory: "/bindings/java"
     schedule:
       interval: monthly
@@ -79,6 +96,7 @@ updates:
   # .sln of its own. Naming the projects keeps discovery from depending on
   # whether Dependabot parses .slnx.
   - package-ecosystem: nuget
+    open-pull-requests-limit: 0  # paused - see banner above
     directories:
       - "/bindings/csharp/src/SiftX"
       - "/bindings/csharp/tests/SiftX.Tests"

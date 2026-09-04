@@ -13,9 +13,10 @@ below still apply to a private fork.
 in place, but nothing runs until Actions is switched on under
 *Settings -> Actions -> General*. Everything below describes what will happen
 then; today, the checks are the local ones. Dependabot is a separate system and
-is not held back by that switch - the config in
-[`.github/dependabot.yml`](../../.github/dependabot.yml) took effect when it
-landed on `main`.
+is *not* held back by that switch - the config in
+[`.github/dependabot.yml`](../../.github/dependabot.yml) took effect the moment
+it landed on `main`, which is why its version updates are paused in the file
+itself. See [Dependency updates](#dependency-updates) below.
 
 ## Running the same checks locally, for free
 
@@ -78,18 +79,28 @@ reference tools, and are run locally. See [../testing.md](../testing.md).
 
 ## Dependency updates
 
-[`.github/dependabot.yml`](../../.github/dependabot.yml) batches version
-updates into one grouped pull request per ecosystem per month, across the five
-ecosystems the workflows build: cargo (the root plus `fuzz/` and the two native
-bindings, which are separate crates with their own lockfiles), npm, maven,
-nuget and the actions themselves.
+**Version updates are paused.** Every ecosystem in
+[`.github/dependabot.yml`](../../.github/dependabot.yml) carries
+`open-pull-requests-limit: 0`, which stops Dependabot opening pull requests
+while keeping the configuration that describes what it should update. Resuming
+is a matter of deleting those five lines; the file says so at the top. The
+reason is sequencing rather than distrust of the updates: with Actions off,
+nothing can test a bump, and a dependency pull request nobody can check is a
+worse thing to merge than a slightly old dependency. Turn CI on first.
+
+This is version updates only. Security updates come through a different
+mechanism, are not shaped by this file, and still open a pull request the day
+an advisory lands.
+
+Unpaused, the file batches version updates into one grouped pull request per
+ecosystem per month, across the five ecosystems the workflows build: cargo (the
+root plus `fuzz/` and the two native bindings, which are separate crates with
+their own lockfiles), npm, maven, nuget and the actions themselves.
 
 Every ecosystem that supports a cooldown gets seven days, so a version yanked
 shortly after publication never reaches a lockfile. `github-actions` is the
 exception - it has no cooldown option - which is worth knowing precisely
-because it is the ecosystem most likely to rot unattended. Security updates are
-a separate mechanism, are not shaped by that schedule or by the groups, and are
-enabled in the repository's security settings rather than in the file.
+because it is the ecosystem most likely to rot unattended.
 
 `rust-toolchain.toml` is not covered. Dependabot can update a toolchain file,
 but only when the channel names a version (`1.90.0`) or a dated nightly; this
