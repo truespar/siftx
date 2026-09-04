@@ -1,7 +1,7 @@
 # Testing
 
 All test data lives in `testdata/` (gitignored - not committed to the repo).
-Total size: ~2 GB across 11 sources.
+Total size: ~2 GB across 12 sources.
 
 ## On using these corpora
 
@@ -39,6 +39,7 @@ testdata/
 |-- pdfbox-testfiles/    -> github.com/apache/pdfbox-testfiles (JBIG2 data, 2.8 MB)
 |-- format-corpus/       -> github.com/openpreserve/format-corpus (194 PDFs + 26 images, 698 MB)
 |-- fuzzing-seeds/       -> github.com/ForAllSecure/starter-testsuites (1277 images + 202 PDFs, 785 MB)
+|-- markitdown-tests/    -> microsoft/markitdown packages/markitdown/tests/test_files (7 PDFs + 25 others, 5 MB)
 `-- pdf-corpora-index/   -> github.com/pdf-association/pdf-corpora (index/reference only)
 ```
 
@@ -107,6 +108,29 @@ testdata/
 - **License:** CC0 (public domain) unless noted per file
 - **Use:** Multi-format testing. CC0 license makes these safe to use freely. Good for file-type detection layer.
 
+#### MarkItDown Test Files
+- **Path:** `testdata/markitdown-tests/`
+- **Source:** `github.com/microsoft/markitdown` (`packages/markitdown/tests/test_files/`)
+- **Contents:** 32 files, 5 MB - 7 PDFs plus DOCX, PPTX, XLSX/XLS, HTML, JPEG, MP3/WAV and an Outlook `.msg`
+- **License:** MIT for the repository. The test files carry their own provenance;
+  `packages/markitdown/ThirdPartyNotices.md` is the upstream record, and is worth
+  reading before reusing any individual file for anything but local testing.
+- **Use:** Small, deliberately-shaped layout cases rather than a broad corpus, and
+  the PDFs are aimed at what our text extraction is weakest at: a borderless table
+  (`SPARSE-2024-INV-1234`), a multipage invoice (`REPAIR-2022-INV-001`), partial list
+  numbering (`masterformat_partial_numbering`), a scan with no text layer
+  (`MEDRPT-2024-PAT-3847`), and two receipt/booking layouts. Their suite asserts
+  substrings present and absent rather than byte-exact output, which is the right
+  shape for reading-order checks - see the note below.
+
+**On reusing their assertions.** MarkItDown's `_test_vectors.py` describes each file
+with a `must_include` / `must_not_include` pair and never compares whole documents.
+That pattern is worth adopting for layout tests here, and an independent
+implementation of it is just a good idea rather than a derived work. Their test code
+itself is Python and MIT-only; SiftX is `MIT OR Apache-2.0`, so transcribing it would
+narrow the licence on whatever file it landed in for no practical gain. Point tests at
+the corpus, do not copy it or the code that reads it.
+
 #### PDFBox Test Files
 - **Path:** `testdata/pdfbox-testfiles/`
 - **Source:** `github.com/apache/pdfbox-testfiles`
@@ -152,6 +176,7 @@ testdata/
 | Font/encoding | `pdfjs-pdfs` | `poppler-test` |
 | Text extraction | `poppler-test` (has expected output) | `pdfjs-pdfs` |
 | Text layout | `poppler-test` | `format-corpus` |
+| Tables and reading order | `markitdown-tests` | `poppler-test` |
 | Image extraction | `poppler-test` | `pdfjs-pdfs` |
 | PDF/A conformance | `verapdf-corpus` + `pdfa-testsuite` | - |
 | JBIG2 streams | `pdfbox-testfiles` | - |
@@ -185,6 +210,9 @@ git clone --depth 1 https://github.com/pdf-association/pdf-corpora.git pdf-corpo
 
 # Multi-format
 git clone --depth 1 https://github.com/openpreserve/format-corpus.git format-corpus
+git clone --depth 1 --filter=blob:none --sparse https://github.com/microsoft/markitdown.git markitdown-temp \
+  && cd markitdown-temp && git sparse-checkout set packages/markitdown/tests/test_files && cd .. \
+  && mv markitdown-temp/packages/markitdown/tests/test_files markitdown-tests && rm -rf markitdown-temp
 
 # Fuzzing
 git clone --depth 1 https://github.com/ForAllSecure/starter-testsuites.git fuzzing-seeds
@@ -204,7 +232,8 @@ git clone --depth 1 https://github.com/ForAllSecure/starter-testsuites.git fuzzi
 | pdfbox-testfiles | 0 | 0 | 31 | 31 | 2.8 MB |
 | format-corpus | 26 | 194 | 426 | 646 | 698 MB |
 | fuzzing-seeds | 1277 | 202 | 67841 | 69320 | 785 MB |
-| **TOTAL** | **~1506** | **~4322** | | **~74956** | **~2 GB** |
+| markitdown-tests | 2 | 7 | 23 | 32 | 5.0 MB |
+| **TOTAL** | **~1508** | **~4329** | | **~74988** | **~2 GB** |
 
 ## Running the tests
 

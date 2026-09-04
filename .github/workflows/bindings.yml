@@ -6,6 +6,27 @@ on:
   pull_request:
   workflow_dispatch:
 
+# The jobs below read the tree, build it and run tests; none of them write to
+# the repository. Without this block GITHUB_TOKEN is minted with whatever the
+# repository default happens to be, which for older repositories is read/write
+# - handed to third-party actions and to build scripts from a pull request's
+# own head.
+permissions:
+  contents: read
+
+# A new push to a pull request supersedes the one before it. Without this,
+# three pushes leave three full matrices running, each filling its own
+# rust-cache entry against the 10 GB per-repository allowance.
+#
+# The event is part of the key, and only pull requests cancel. Without both,
+# a push to main would land in the same group as a manual run on main and kill
+# the long macOS/Windows matrix that is the only reason to dispatch this
+# workflow - and cancelled main builds lose the per-commit attribution that
+# makes a break easy to place.
+concurrency:
+  group: "${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}"
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 env:
   CARGO_TERM_COLOR: always
 
@@ -21,6 +42,12 @@ jobs:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+        with:
+          # A standalone crate root with its own Cargo.lock, so the build below
+          # writes to bindings/python/target rather than the root's. Left at the
+          # default only the registry is cached and the native library is
+          # recompiled from scratch every run.
+          workspaces: "bindings/python -> target"
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
@@ -39,6 +66,12 @@ jobs:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+        with:
+          # A standalone crate root with its own Cargo.lock, so the build below
+          # writes to bindings/nodejs/target rather than the root's. Left at the
+          # default only the registry is cached and the native library is
+          # recompiled from scratch every run.
+          workspaces: "bindings/nodejs -> target"
       - uses: actions/setup-node@v4
         with:
           node-version: "22"

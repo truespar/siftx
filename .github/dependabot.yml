@@ -1,0 +1,93 @@
+# Dependabot: version updates, batched and slow.
+#
+# Security updates are a separate mechanism and are deliberately not shaped by
+# anything here - `groups` and `schedule` apply to version updates only, so an
+# advisory still opens its own pull request the day it lands. Those are enabled
+# in the repository's security settings, not in this file.
+#
+# https://github.blog/security/supply-chain-security/tame-dependabot-group-your-updates-slow-the-cadence-keep-security-fast/
+version: 2
+updates:
+  # The workflows pin their actions by major tag. Nothing bumps those without
+  # this, so they rot quietly - which is the failure mode worth covering, more
+  # than the six runtime crates below.
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: monthly
+    groups:
+      actions:
+        patterns:
+          - "*"
+
+  # One pull request a month for the whole graph. The tree is small enough that
+  # this is about keeping future noise low rather than fixing noise today.
+  #
+  # Four directories, because there is no [workspace] in the root manifest:
+  # fuzz/ declares a workspace of its own and the two native bindings are
+  # separate crates, each with its own Cargo.lock. CI builds all of them, so a
+  # dependency that rots in any of them is a red tick with nothing to bump it.
+  - package-ecosystem: cargo
+    directories:
+      - "/"
+      - "/fuzz"
+      - "/bindings/python"
+      - "/bindings/nodejs"
+    schedule:
+      interval: monthly
+    # Let a release sit before taking it, so a version yanked days after
+    # publication never reaches the lockfile.
+    cooldown:
+      default-days: 7
+    groups:
+      cargo:
+        patterns:
+          - "*"
+    open-pull-requests-limit: 5
+
+  # The other three ecosystems CI now builds and tests on every pull request.
+  - package-ecosystem: npm
+    directory: "/bindings/nodejs"
+    schedule:
+      interval: monthly
+    cooldown:
+      default-days: 7
+    # This package's optionalDependencies are its own napi platform builds,
+    # pinned to the parent's version. They are not on the registry yet, and
+    # once they are, napi needs them to move in lockstep with the parent
+    # rather than being bumped on their own inside a group.
+    ignore:
+      - dependency-name: "@truespar/siftx-*"
+    groups:
+      npm:
+        patterns:
+          - "*"
+
+  - package-ecosystem: maven
+    directory: "/bindings/java"
+    schedule:
+      interval: monthly
+    cooldown:
+      default-days: 7
+    groups:
+      maven:
+        patterns:
+          - "*"
+
+  # Pointed at the project directories rather than /bindings/csharp, which
+  # holds only SiftX.slnx - the newer XML solution format, and no .csproj or
+  # .sln of its own. Naming the projects keeps discovery from depending on
+  # whether Dependabot parses .slnx.
+  - package-ecosystem: nuget
+    directories:
+      - "/bindings/csharp/src/SiftX"
+      - "/bindings/csharp/tests/SiftX.Tests"
+      - "/bindings/csharp/tests/SiftX.Benchmarks"
+    schedule:
+      interval: monthly
+    cooldown:
+      default-days: 7
+    groups:
+      nuget:
+        patterns:
+          - "*"

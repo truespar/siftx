@@ -55,8 +55,8 @@ Nothing enforces that automatically yet, so it is on you and on review.
 under `-D warnings`, every feature combination, clippy, cargo-deny and the fuzz
 targets - and reports pass or fail per check without stopping at the first
 failure. `--bindings` adds the four language suites. `scripts/check.ps1` is the
-Windows equivalent. There is no CI; see [docs/ci/](docs/ci/) for the workflow
-files and what activating them would cost.
+Windows equivalent. CI runs the same checks on pushes to `main` and on pull
+requests; see [docs/ci/](docs/ci/) for what it does and does not cover.
 
 **Clippy has no errors.** Its deny-level lints - the ones that flag a probable
 defect rather than a style preference - are at zero, and should stay there.

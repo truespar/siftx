@@ -6,6 +6,27 @@ on:
   pull_request:
   workflow_dispatch:
 
+# The jobs below read the tree, build it and run tests; none of them write to
+# the repository. Without this block GITHUB_TOKEN is minted with whatever the
+# repository default happens to be, which for older repositories is read/write
+# - handed to third-party actions and to build scripts from a pull request's
+# own head.
+permissions:
+  contents: read
+
+# A new push to a pull request supersedes the one before it. Without this,
+# three pushes leave three full matrices running, each filling its own
+# rust-cache entry against the 10 GB per-repository allowance.
+#
+# The event is part of the key, and only pull requests cancel. Without both,
+# a push to main would land in the same group as a manual run on main and kill
+# the long macOS/Windows matrix that is the only reason to dispatch this
+# workflow - and cancelled main builds lose the per-commit attribution that
+# makes a break easy to place.
+concurrency:
+  group: "${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}"
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 env:
   CARGO_TERM_COLOR: always
 
@@ -58,9 +79,29 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@nightly
+      # RUSTUP_TOOLCHAIN rather than `cargo +nightly`, and set on both steps:
+      # rust-toolchain.toml at the repository root pins stable and applies to
+      # fuzz/ too, and a toolchain file outranks the rustup default the action
+      # sets - so without an override this job checks the fuzz targets on
+      # stable, which is not what it is for. `+nightly` fixes the compiler but
+      # not what rust-cache sees, leaving nightly artifacts under a
+      # stable-derived key that never rotates when nightly moves. The env var
+      # outranks the file for both. It is not set job-wide so that the
+      # toolchain install above runs before nightly is required to exist.
       - uses: Swatinem/rust-cache@v2
+        env:
+          RUSTUP_TOOLCHAIN: nightly
+        with:
+          # fuzz/ declares its own [workspace] and the root manifest declares
+          # none, so this job's only build output is fuzz/target. Left at the
+          # default the action caches the root's target instead, and the job
+          # rebuilds the whole graph on nightly every run. Naming it also puts
+          # fuzz/Cargo.lock in the cache key.
+          workspaces: "fuzz -> target"
       - name: Check
         working-directory: fuzz
+        env:
+          RUSTUP_TOOLCHAIN: nightly
         run: cargo check --all-targets
 
   features:
@@ -136,7 +177,17 @@ jobs:
 
       # Pinned: an unpinned generator makes the comparison below
       # irreproducible, since a new cargo-about can reformat the output.
+      # rust-cache does not restore ~/.cargo/bin, so without this the job pays
+      # a multi-minute source build of cargo-about on every push and every
+      # pull request. Keyed by the version, so a bump installs afresh.
+      - name: Cache cargo-about
+        id: cargo-about-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/bin/cargo-about
+          key: cargo-about-0.9.2-${{ runner.os }}
       - name: Install cargo-about
+        if: steps.cargo-about-cache.outputs.cache-hit != 'true'
         run: cargo install --locked --features cli --version 0.9.2 cargo-about
 
       # Attribution: MIT and Apache-2.0 require their notices to ship with the
