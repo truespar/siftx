@@ -182,7 +182,7 @@ jobs:
       # pull request. Keyed by the version, so a bump installs afresh.
       - name: Cache cargo-about
         id: cargo-about-cache
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ~/.cargo/bin/cargo-about
           key: cargo-about-0.9.2-${{ runner.os }}
