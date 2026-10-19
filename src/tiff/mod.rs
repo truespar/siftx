@@ -10,8 +10,11 @@ use crate::core::{Error, Reader, RecursionGuard, Result};
 /// Maximum number of IFD entries we'll accept in a single IFD (DoS protection).
 const MAX_IFD_ENTRIES: usize = 10_000;
 
-/// Maximum number of IFDs to follow in a chain.
-const MAX_IFD_CHAIN: usize = 100;
+/// Maximum number of IFDs to follow in a chain. Cycles are caught by the guard's visited set;
+/// this bounds only the work a hostile file can demand. Scanned multi-page documents routinely
+/// run to several hundred pages (one IFD each), so the bound must sit well above that: at 100
+/// the walker silently returned the first 100 pages of a longer document.
+const MAX_IFD_CHAIN: usize = 65_536;
 
 /// TIFF data types with their sizes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -793,6 +796,41 @@ pub fn read_u64_array(entry: &IfdEntry<'_>, big_endian: bool) -> Vec<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A little-endian TIFF whose chain holds `n` minimal IFDs (one SHORT entry each).
+    fn build_chain_le(n: usize) -> Vec<u8> {
+        const IFD_SIZE: u32 = 2 + 12 + 4;
+        let mut data = Vec::new();
+        data.extend_from_slice(b"II");
+        data.extend_from_slice(&42u16.to_le_bytes());
+        data.extend_from_slice(&8u32.to_le_bytes());
+        for k in 0..n {
+            data.extend_from_slice(&1u16.to_le_bytes()); // one entry
+            data.extend_from_slice(&0x0100u16.to_le_bytes()); // ImageWidth
+            data.extend_from_slice(&3u16.to_le_bytes()); // SHORT
+            data.extend_from_slice(&1u32.to_le_bytes());
+            data.extend_from_slice(&[1, 0, 0, 0]);
+            let next = if k + 1 == n { 0 } else { 8 + IFD_SIZE * (k as u32 + 1) };
+            data.extend_from_slice(&next.to_le_bytes());
+        }
+        data
+    }
+
+    #[test]
+    fn a_long_ifd_chain_is_followed_to_its_end() {
+        let data = build_chain_le(150);
+        let (_, ifds) = parse_tiff(&data).unwrap();
+        assert_eq!(ifds.len(), 150);
+    }
+
+    #[test]
+    fn a_circular_ifd_chain_stops() {
+        let mut data = build_chain_le(3);
+        let last_next = data.len() - 4;
+        data[last_next..].copy_from_slice(&8u32.to_le_bytes()); // last IFD points back at the first
+        let (_, ifds) = parse_tiff(&data).unwrap();
+        assert_eq!(ifds.len(), 3);
+    }
 
     /// Build a minimal TIFF file (LE) with the given IFD entries.
     /// Each entry is (tag, type, count, value_bytes).
