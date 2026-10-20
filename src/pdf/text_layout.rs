@@ -1394,6 +1394,24 @@ fn estimate_avg_char_width(blocks: &[TextBlock]) -> f64 {
 }
 
 /// TL1 public API: extract positioned characters from a page.
+/// The page's words with their characters, for callers that need to know
+/// where text sits rather than read it: the layout pipeline's first steps
+/// (collect, de-duplicate fake-bold overdraws, group into words), stopping
+/// before lines and reading order. A "word" here is a run of glyphs, and a
+/// space drawn as a glyph doesn't end one, so the public API
+/// (`SiftDocument::page_words`) splits runs at their space characters.
+pub fn extract_words(doc: &Document, page: &Page) -> Result<Vec<TextWord>> {
+    let (spans, fonts_map) = ContentInterpreter::process_page(doc, page)?;
+    let page_fonts: Vec<(Vec<u8>, PdfFont)> = fonts_map.into_iter().collect();
+    let mut chars = collect_chars(&spans, &page_fonts);
+    if chars.is_empty() {
+        return Ok(Vec::new());
+    }
+    let _pool = bucket_by_baseline(&mut chars);
+    remove_duplicates(&mut chars);
+    Ok(form_words(&chars))
+}
+
 pub fn extract_chars(doc: &Document, page: &Page) -> Result<Vec<PositionedChar>> {
     let (spans, fonts_map) = ContentInterpreter::process_page(doc, page)?;
     let page_fonts: Vec<(Vec<u8>, PdfFont)> = fonts_map.into_iter().collect();

@@ -42,6 +42,8 @@ pub mod core;
 
 // Re-export high-level API at crate root
 pub use api::{GpsCoordinates, Image, ImageData, SiftDocument, SiftFile, Tag, open, read, tags};
+#[cfg(feature = "pdf")]
+pub use api::{PageWord, PageWords};
 
 // Re-export PDF types used by CLI
 #[cfg(feature = "pdf")]

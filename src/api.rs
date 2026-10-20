@@ -90,6 +90,63 @@ impl SiftFile {
 // SiftDocument - parsed content, borrows from data
 // ---------------------------------------------------------------------------
 
+/// One page's words with their positions ([`SiftDocument::page_words`]).
+#[cfg(feature = "pdf")]
+#[derive(Debug, Clone, PartialEq)]
+pub struct PageWords {
+    /// The crop box's size in points.
+    pub width: f64,
+    pub height: f64,
+    /// Top to bottom, left to right. Empty when the page has no text layer.
+    pub words: Vec<PageWord>,
+}
+
+/// A word on a PDF page and its box.
+#[cfg(feature = "pdf")]
+#[derive(Debug, Clone, PartialEq)]
+pub struct PageWord {
+    pub text: String,
+    /// The box in points from the crop box's top-left corner, y down. The
+    /// vertical extent is the font's: from the baseline up by the font size,
+    /// so descenders reach a little below `y1`.
+    pub x0: f64,
+    pub y0: f64,
+    pub x1: f64,
+    pub y1: f64,
+    /// Drawn invisibly (text render mode 3): usually an OCR layer laid over
+    /// a scan, which says what an OCR engine read, not what was typeset.
+    pub invisible: bool,
+}
+
+#[cfg(feature = "pdf")]
+impl PageWord {
+    /// `chars` in user space (origin bottom left), to a word in page space.
+    fn from_chars(
+        chars: &[&crate::pdf::text_layout::PositionedChar],
+        left: f64,
+        top: f64,
+    ) -> PageWord {
+        let mut x0 = f64::MAX;
+        let mut x1 = f64::MIN;
+        let mut lo = f64::MAX;
+        let mut hi = f64::MIN;
+        for c in chars {
+            x0 = x0.min(c.x);
+            x1 = x1.max(c.x + c.width);
+            lo = lo.min(c.y);
+            hi = hi.max(c.y + c.height);
+        }
+        PageWord {
+            text: chars.iter().map(|c| c.unicode.as_str()).collect(),
+            x0: x0 - left,
+            y0: top - hi,
+            x1: x1 - left,
+            y1: top - lo,
+            invisible: chars.iter().all(|c| c.render_mode == 3),
+        }
+    }
+}
+
 /// A parsed document. Borrows from the input data for zero-copy access.
 ///
 /// Provides three views:
@@ -600,6 +657,55 @@ impl<'a> SiftDocument<'a> {
                 Ok(pages)
             }
             _ => Ok(Vec::new()),
+        }
+    }
+
+    /// The words on one page (0-based) and where each one is: for callers
+    /// that need positions rather than reading text - finding a table's
+    /// columns, checking an extracted value against what the page prints,
+    /// highlighting a match.
+    ///
+    /// Boxes are in PDF points from the top-left corner of the page's crop
+    /// box, y growing downward (the convention of rendered images and
+    /// viewers). A word is a run of glyphs split at spaces, so "1 234 567"
+    /// drawn with space glyphs comes back as three words, close together.
+    /// Words are in top-to-bottom, left-to-right order. `/Rotate` isn't
+    /// applied: boxes are in the page's unrotated frame, like its content.
+    ///
+    /// Only this page's content is interpreted. An empty `words` means the
+    /// page has no text layer (a scan, or a blank page). Returns `Ok(None)`
+    /// for non-PDF formats.
+    #[cfg(feature = "pdf")]
+    pub fn page_words(&self, index: usize) -> Result<Option<PageWords>> {
+        match &self.inner {
+            DocumentInner::Pdf { doc } => {
+                let page = doc.page(index as u32)?;
+                let runs = crate::pdf::text_layout::extract_words(doc, &page)?;
+                let [left, bottom, right, top] = page.crop_box;
+                let mut words = Vec::new();
+                for run in &runs {
+                    let mut piece: Vec<&crate::pdf::text_layout::PositionedChar> = Vec::new();
+                    // a whitespace glyph ends a word; the end of the run too
+                    for ch in run.chars.iter().map(Some).chain(std::iter::once(None)) {
+                        match ch {
+                            Some(c) if !c.unicode.chars().all(char::is_whitespace) => piece.push(c),
+                            _ => {
+                                if !piece.is_empty() {
+                                    words.push(PageWord::from_chars(&piece, left, top));
+                                    piece.clear();
+                                }
+                            }
+                        }
+                    }
+                }
+                words.sort_by(|a, b| a.y0.total_cmp(&b.y0).then(a.x0.total_cmp(&b.x0)));
+                Ok(Some(PageWords {
+                    width: (right - left).abs(),
+                    height: (top - bottom).abs(),
+                    words,
+                }))
+            }
+            _ => Ok(None),
         }
     }
 
