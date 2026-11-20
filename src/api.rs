@@ -441,6 +441,18 @@ impl<'a> SiftDocument<'a> {
         tags
     }
 
+    // -- Duration ------------------------------------------------------------
+
+    /// A movie's length in seconds (QuickTime, MP4, M4A): the movie header's, else a
+    /// fragmented file's, else its longest track's. None for other files, or one that says none.
+    pub fn duration(&self) -> Option<f64> {
+        #[cfg(feature = "quicktime")]
+        if let DocumentInner::QuickTime { info } = &self.inner {
+            return info.duration_secs();
+        }
+        None
+    }
+
     // -- GPS coordinates ---------------------------------------------------
 
     /// Extract GPS coordinates from EXIF or XMP metadata.

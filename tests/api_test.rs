@@ -429,6 +429,35 @@ fn thumbnail_scan_jpegs() {
 // QuickTime/MP4 tests
 // ---------------------------------------------------------------------------
 
+/// a recording with its media before its moov, written to disk and opened (mapped, never read
+/// whole): its length from the movie header
+#[test]
+fn quicktime_duration_from_a_file() {
+    fn bx(kind: &[u8; 4], body: &[u8]) -> Vec<u8> {
+        let mut b = ((body.len() + 8) as u32).to_be_bytes().to_vec();
+        b.extend_from_slice(kind);
+        b.extend_from_slice(body);
+        b
+    }
+    let mut mvhd = vec![0u8; 12];
+    mvhd.extend_from_slice(&600u32.to_be_bytes());
+    mvhd.extend_from_slice(&(600u32 * 1800).to_be_bytes());
+    mvhd.resize(100, 0);
+    let mut f = bx(b"ftyp", b"mp42\0\0\0\0mp42isom");
+    f.extend(bx(b"mdat", &vec![0u8; 256 * 1024]));
+    f.extend(bx(b"moov", &bx(b"mvhd", &mvhd)));
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("meeting.mp4");
+    std::fs::write(&path, &f).unwrap();
+    let file = siftx::open(&path).unwrap();
+    assert_eq!(file.parse().unwrap().duration(), Some(1800.0));
+    // not a movie: none
+    let png = siftx::read(b"\x89PNG\r\n\x1a\n")
+        .map(|d| d.duration())
+        .unwrap_or(None);
+    assert_eq!(png, None);
+}
+
 #[test]
 fn quicktime_detection() {
     let mp4 = Path::new("testdata/fuzzing-seeds/mp4/h264-aac-publicdomain-sample.mp4");

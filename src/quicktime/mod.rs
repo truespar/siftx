@@ -17,6 +17,9 @@ pub struct QuickTimeInfo<'a> {
     pub modification_time: Option<u64>,
     pub time_scale: Option<u32>,
     pub duration: Option<u64>,
+    /// A fragmented file's whole length (mvex->mehd), in the movie's time scale: its movie
+    /// header's duration is 0 or the first fragment's.
+    pub fragment_duration: Option<u64>,
     /// Tracks.
     pub tracks: Vec<Track>,
     /// Raw XMP data from udta->meta or uuid box.
@@ -145,6 +148,7 @@ pub fn parse_quicktime<'a>(data: &'a [u8]) -> Result<QuickTimeInfo<'a>> {
         tracks: Vec::new(),
         xmp_data: None,
         gps_string: None,
+        fragment_duration: None,
     };
 
     // moov box contains all metadata
@@ -154,6 +158,14 @@ pub fn parse_quicktime<'a>(data: &'a [u8]) -> Result<QuickTimeInfo<'a>> {
         // mvhd - movie header
         if let Some(mvhd) = moov_children.iter().find(|b| &b.box_type == b"mvhd") {
             parse_mvhd(mvhd.data, &mut info);
+        }
+
+        // mvex -> mehd: a fragmented file's length
+        if let Some(mvex) = moov_children.iter().find(|b| &b.box_type == b"mvex")
+            && let Ok(kids) = crate::heif::parse_boxes(mvex.data)
+            && let Some(mehd) = kids.iter().find(|b| &b.box_type == b"mehd")
+        {
+            info.fragment_duration = parse_mehd(mehd.data);
         }
 
         // trak boxes - one per track
@@ -199,6 +211,38 @@ fn parse_mvhd(data: &[u8], info: &mut QuickTimeInfo) {
         info.modification_time = r.read_u32_be().ok().map(|v| v as u64);
         info.time_scale = r.read_u32_be().ok();
         info.duration = r.read_u32_be().ok().map(|v| v as u64);
+    }
+}
+
+/// Parse mehd (movie extends header): the fragment duration, 32 or 64 bits by version.
+fn parse_mehd(data: &[u8]) -> Option<u64> {
+    let version = *data.first()?;
+    let mut r = Reader::new(data.get(4..)?);
+    if version == 1 {
+        r.read_u64_be().ok()
+    } else {
+        r.read_u32_be().ok().map(|v| v as u64)
+    }
+}
+
+impl QuickTimeInfo<'_> {
+    /// The movie's length in seconds: the movie header's, else a fragmented file's (mehd),
+    /// else its longest track's. None when the file says none.
+    pub fn duration_secs(&self) -> Option<f64> {
+        let scaled = |d: Option<u64>| match (d, self.time_scale) {
+            (Some(d), Some(ts)) if d > 0 && ts > 0 => Some(d as f64 / ts as f64),
+            _ => None,
+        };
+        scaled(self.fragment_duration)
+            .filter(|f| scaled(self.duration).is_none_or(|m| *f > m))
+            .or_else(|| scaled(self.duration))
+            .or_else(|| {
+                self.tracks
+                    .iter()
+                    .map(|t| t.duration_secs)
+                    .filter(|d| d.is_finite() && *d > 0.0)
+                    .reduce(f64::max)
+            })
     }
 }
 
@@ -667,6 +711,60 @@ mod tests {
         assert_eq!(format_duration(30.0), "0:30");
         assert_eq!(format_duration(90.0), "1:30");
         assert_eq!(format_duration(3661.0), "1:01:01");
+    }
+
+    /// one box: size, type, body
+    fn mp4_box(kind: &[u8; 4], body: &[u8]) -> Vec<u8> {
+        let mut b = ((body.len() + 8) as u32).to_be_bytes().to_vec();
+        b.extend_from_slice(kind);
+        b.extend_from_slice(body);
+        b
+    }
+
+    /// a version 0 mvhd: times, time scale, duration (the rest of the header left zero)
+    fn mvhd(time_scale: u32, duration: u32) -> Vec<u8> {
+        let mut body = vec![0u8; 4];
+        body.extend_from_slice(&0u32.to_be_bytes());
+        body.extend_from_slice(&0u32.to_be_bytes());
+        body.extend_from_slice(&time_scale.to_be_bytes());
+        body.extend_from_slice(&duration.to_be_bytes());
+        body.resize(100, 0);
+        mp4_box(b"mvhd", &body)
+    }
+
+    fn ftyp() -> Vec<u8> {
+        mp4_box(b"ftyp", b"isom\0\0\x02\0isomiso2mp41")
+    }
+
+    #[test]
+    fn duration_from_the_movie_header_after_the_media() {
+        // a recording as a meeting tool writes it: the media first, the moov at the end
+        let mut f = ftyp();
+        f.extend(mp4_box(b"mdat", &vec![0u8; 64 * 1024]));
+        f.extend(mp4_box(b"moov", &mvhd(1000, 17_250)));
+        let info = parse_quicktime(&f).unwrap();
+        assert_eq!(info.duration_secs(), Some(17.25));
+    }
+
+    #[test]
+    fn duration_of_a_fragmented_file_from_mehd() {
+        // the movie header says the first fragment only; mehd the whole
+        let mut mehd = vec![1u8, 0, 0, 0];
+        mehd.extend_from_slice(&22_000u64.to_be_bytes());
+        let mut moov = mvhd(1000, 0);
+        moov.extend(mp4_box(b"mvex", &mp4_box(b"mehd", &mehd)));
+        let mut f = ftyp();
+        f.extend(mp4_box(b"moov", &moov));
+        let info = parse_quicktime(&f).unwrap();
+        assert_eq!(info.fragment_duration, Some(22_000));
+        assert_eq!(info.duration_secs(), Some(22.0));
+    }
+
+    #[test]
+    fn no_duration_when_the_file_says_none() {
+        let mut f = ftyp();
+        f.extend(mp4_box(b"moov", &mvhd(1000, 0)));
+        assert_eq!(parse_quicktime(&f).unwrap().duration_secs(), None);
     }
 
     #[test]

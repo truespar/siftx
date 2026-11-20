@@ -51,6 +51,10 @@ as a flat list of tags or as typed accessors:
 - AcroForm fields, all 28 annotation types, and the tagged-PDF structure tree
 - Encrypted documents (RC4 and AES-128/256, revisions 2-6) once authenticated
 
+**From movies** (QuickTime, MP4, M4A) - brands, dates, tracks and codecs, and the
+length in seconds (`duration()`: the movie header's, a fragmented file's, or the
+longest track's), read from a mapped file without loading the media
+
 **Formats read:** JPEG, TIFF, PNG, WebP, HEIC/HEIF, GIF, BMP, PDF,
 QuickTime/MP4, standalone ICC profiles, and camera RAW (CR2, CR3, NEF, ARW,
 DNG, ORF, PEF, RW2, RAF, SRW).
