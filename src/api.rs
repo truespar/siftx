@@ -400,6 +400,30 @@ impl<'a> SiftDocument<'a> {
         self.file_type
     }
 
+    /// The number of pages of a paged document: a PDF's page tree count, or a TIFF's
+    /// full-resolution images in its main IFD chain (an image marked reduced-resolution in
+    /// NewSubfileType, bit 0, is a preview of a page, not a page). `None` for every other format,
+    /// a camera RAW included, and for a PDF whose page tree states no count.
+    pub fn page_count(&self) -> Option<u32> {
+        match &self.inner {
+            #[cfg(feature = "pdf")]
+            DocumentInner::Pdf { doc } => doc.page_count().ok(),
+            #[cfg(feature = "tiff")]
+            DocumentInner::Tiff { header, ifds } if self.file_type == Some(FileType::Tiff) => {
+                let pages = ifds
+                    .iter()
+                    .filter(|ifd| {
+                        ifd.entry(254)
+                            .and_then(|e| crate::tiff::read_u64_array(e, header.big_endian).first().copied())
+                            .is_none_or(|subfile| subfile & 1 == 0)
+                    })
+                    .count();
+                u32::try_from(pages).ok()
+            }
+            _ => None,
+        }
+    }
+
     // -- Metadata tags ----------------------------------------------------
 
     /// Extract all metadata as flat tags, similar to ExifTool output.

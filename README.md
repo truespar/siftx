@@ -195,6 +195,7 @@ try (var file = SiftFile.open("scan.pdf"); var doc = file.parse()) {
 | `exif_tags()` / `xmp_tags()` / `iptc_tags()` | one group only |
 | `gps()` | decimal degrees, altitude, timestamp |
 | `thumbnail()` | embedded JPEG thumbnail bytes |
+| `page_count()` | pages of a PDF or a TIFF (its previews not counted); none for other formats |
 | `text_pages()` / `text_pages_raw()` | text per page, with or without layout |
 | `images()` | embedded images with geometry and bytes |
 | `acro_form()` | form fields and document-level flags |
